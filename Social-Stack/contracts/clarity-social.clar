@@ -8,7 +8,7 @@
 ;; Define the contract administrator
 (define-constant contract-admin tx-sender)
 
-;; Error codes with descriptive names
+;; Error codes
 (define-constant ERR-PROFILE-EXISTS u1)
 (define-constant ERR-PROFILE-NOT-FOUND u3)
 (define-constant ERR-TARGET-PROFILE-NOT-FOUND u4)
@@ -37,6 +37,9 @@
 (define-constant ERR-OWNER-PRIVILEGES-REQUIRED u28)
 (define-constant ERR-REMOVE-ADMIN-NOT-FOUND u29)
 (define-constant ERR-USER-NOT-ADMIN u36)
+(define-constant ERR-INVALID-POST-ID u37)
+(define-constant ERR-INVALID-COMMENT-ID u38)
+(define-constant ERR-INVALID-USER-ADDRESS u39)
 
 ;; User profile data structure
 (define-map user-data principal
@@ -79,7 +82,7 @@
 ;; Comment ID tracker
 (define-data-var next-comment-id uint u0)
 
-;; ========== USER MANAGEMENT FUNCTIONS ==========
+;; USER MANAGEMENT FUNCTIONS
 
 ;; Register a new user profile
 (define-public (register-user-profile (display-name (string-utf8 30)) (profile-description (string-utf8 160)))
@@ -123,7 +126,7 @@
     )
 )
 
-;; ========== CONTENT MANAGEMENT FUNCTIONS ==========
+;; CONTENT MANAGEMENT FUNCTIONS
 
 ;; Create a new post
 (define-public (publish-new-post (post-text (string-utf8 280)))
@@ -147,9 +150,15 @@
 
 ;; Add like/appreciation to a post
 (define-public (appreciate-post (post-id uint))
-    (match (map-get? content-posts post-id)
-        post (ok (map-set content-posts post-id (merge post {appreciation-count: (+ (get appreciation-count post) u1)})))
-        (err ERR-POST-UNAVAILABLE)
+    (begin
+        ;; Validate post-id is valid
+        (asserts! (> post-id u0) (err ERR-INVALID-POST-ID))
+        (asserts! (<= post-id (var-get next-post-id)) (err ERR-INVALID-POST-ID))
+        
+        (match (map-get? content-posts post-id)
+            post (ok (map-set content-posts post-id (merge post {appreciation-count: (+ (get appreciation-count post) u1)})))
+            (err ERR-POST-UNAVAILABLE)
+        )
     )
 )
 
@@ -160,27 +169,33 @@
 
 ;; Add a comment to a post
 (define-public (create-post-comment (post-id uint) (comment-text (string-utf8 280)))
-    (let (
-        (current-user tx-sender)
-        (comment-id (+ (var-get next-comment-id) u1))
-    )
+    (begin
+        ;; Validate post-id is valid
+        (asserts! (> post-id u0) (err ERR-INVALID-POST-ID))
+        (asserts! (<= post-id (var-get next-post-id)) (err ERR-INVALID-POST-ID))
         (asserts! (>= (len comment-text) u1) (err ERR-COMMENT-CONTENT-EMPTY))
-        (match (map-get? content-posts post-id)
-            post (begin
-                (var-set next-comment-id comment-id)
-                (map-set content-comments comment-id {
-                    creator: current-user,
-                    parent-post-id: post-id,
-                    comment-text: comment-text,
-                    creation-time: block-height,
-                    moderation-flag: false,
-                    report-count: u0
-                })
-                (let ((updated-comments (unwrap! (as-max-len? (append (get post-comments post) comment-id) u100) (err ERR-COMMENT-APPEND-FAILED))))
-                    (ok (map-set content-posts post-id (merge post {post-comments: updated-comments})))
+        
+        (let (
+            (current-user tx-sender)
+            (comment-id (+ (var-get next-comment-id) u1))
+        )
+            (match (map-get? content-posts post-id)
+                post (begin
+                    (var-set next-comment-id comment-id)
+                    (map-set content-comments comment-id {
+                        creator: current-user,
+                        parent-post-id: post-id,
+                        comment-text: comment-text,
+                        creation-time: block-height,
+                        moderation-flag: false,
+                        report-count: u0
+                    })
+                    (let ((updated-comments (unwrap! (as-max-len? (append (get post-comments post) comment-id) u100) (err ERR-COMMENT-APPEND-FAILED))))
+                        (ok (map-set content-posts post-id (merge post {post-comments: updated-comments})))
+                    )
                 )
+                (err ERR-COMMENT-POST-NOT-FOUND)
             )
-            (err ERR-COMMENT-POST-NOT-FOUND)
         )
     )
 )
@@ -198,101 +213,135 @@
     )
 )
 
-;; ========== MODERATION FUNCTIONS ==========
+;; MODERATION FUNCTIONS
 
 ;; Report/flag a post
 (define-public (report-inappropriate-post (post-id uint))
-    (match (map-get? content-posts post-id)
-        post (let (
-            (updated-report-count (+ (get report-count post) u1))
-            (updated-post (merge post {
-                report-count: updated-report-count,
-                moderation-flag: (> updated-report-count u5)
-            }))
+    (begin
+        ;; Validate post-id is valid
+        (asserts! (> post-id u0) (err ERR-INVALID-POST-ID))
+        (asserts! (<= post-id (var-get next-post-id)) (err ERR-INVALID-POST-ID))
+        
+        (match (map-get? content-posts post-id)
+            post (let (
+                (updated-report-count (+ (get report-count post) u1))
+                (updated-post (merge post {
+                    report-count: updated-report-count,
+                    moderation-flag: (> updated-report-count u5)
+                }))
+            )
+                (ok (map-set content-posts post-id updated-post))
+            )
+            (err ERR-POST-FLAG-NOT-FOUND)
         )
-            (ok (map-set content-posts post-id updated-post))
-        )
-        (err ERR-POST-FLAG-NOT-FOUND)
     )
 )
 
 ;; Report/flag a comment
 (define-public (report-inappropriate-comment (comment-id uint))
-    (match (map-get? content-comments comment-id)
-        comment (let (
-            (updated-report-count (+ (get report-count comment) u1))
-            (updated-comment (merge comment {
-                report-count: updated-report-count,
-                moderation-flag: (> updated-report-count u5)
-            }))
+    (begin
+        ;; Validate comment-id is valid
+        (asserts! (> comment-id u0) (err ERR-INVALID-COMMENT-ID))
+        (asserts! (<= comment-id (var-get next-comment-id)) (err ERR-INVALID-COMMENT-ID))
+        
+        (match (map-get? content-comments comment-id)
+            comment (let (
+                (updated-report-count (+ (get report-count comment) u1))
+                (updated-comment (merge comment {
+                    report-count: updated-report-count,
+                    moderation-flag: (> updated-report-count u5)
+                }))
+            )
+                (ok (map-set content-comments comment-id updated-comment))
+            )
+            (err ERR-COMMENT-FLAG-NOT-FOUND)
         )
-            (ok (map-set content-comments comment-id updated-comment))
-        )
-        (err ERR-COMMENT-FLAG-NOT-FOUND)
     )
 )
 
-;; ========== ADMIN FUNCTIONS ==========
+;; ADMIN FUNCTIONS
 
 ;; Remove a flagged post (admin only)
 (define-public (moderate-flagged-post (post-id uint))
-    (let (
-        (current-user tx-sender)
-        (admin-profile (unwrap! (map-get? user-data current-user) (err ERR-ADMIN-PROFILE-NOT-FOUND)))
-    )
-        (asserts! (get admin-status admin-profile) (err ERR-ADMIN-ACCESS-REQUIRED))
-        (match (map-get? content-posts post-id)
-            post (begin
-                (map-delete content-posts post-id)
-                (ok true)
+    (begin
+        ;; Validate post-id is valid
+        (asserts! (> post-id u0) (err ERR-INVALID-POST-ID))
+        (asserts! (<= post-id (var-get next-post-id)) (err ERR-INVALID-POST-ID))
+        
+        (let (
+            (current-user tx-sender)
+            (admin-profile (unwrap! (map-get? user-data current-user) (err ERR-ADMIN-PROFILE-NOT-FOUND)))
+        )
+            (asserts! (get admin-status admin-profile) (err ERR-ADMIN-ACCESS-REQUIRED))
+            (match (map-get? content-posts post-id)
+                post (begin
+                    (map-delete content-posts post-id)
+                    (ok true)
+                )
+                (err ERR-REMOVAL-POST-NOT-FOUND)
             )
-            (err ERR-REMOVAL-POST-NOT-FOUND)
         )
     )
 )
 
 ;; Remove a flagged comment (admin only)
 (define-public (moderate-flagged-comment (comment-id uint))
-    (let (
-        (current-user tx-sender)
-        (admin-profile (unwrap! (map-get? user-data current-user) (err ERR-ADMIN-COMMENT-NOT-FOUND)))
-    )
-        (asserts! (get admin-status admin-profile) (err ERR-ADMIN-PRIVILEGES-REQUIRED))
-        (match (map-get? content-comments comment-id)
-            comment (begin
-                (map-delete content-comments comment-id)
-                (ok true)
+    (begin
+        ;; Validate comment-id is valid
+        (asserts! (> comment-id u0) (err ERR-INVALID-COMMENT-ID))
+        (asserts! (<= comment-id (var-get next-comment-id)) (err ERR-INVALID-COMMENT-ID))
+        
+        (let (
+            (current-user tx-sender)
+            (admin-profile (unwrap! (map-get? user-data current-user) (err ERR-ADMIN-COMMENT-NOT-FOUND)))
+        )
+            (asserts! (get admin-status admin-profile) (err ERR-ADMIN-PRIVILEGES-REQUIRED))
+            (match (map-get? content-comments comment-id)
+                comment (begin
+                    (map-delete content-comments comment-id)
+                    (ok true)
+                )
+                (err ERR-REMOVAL-COMMENT-NOT-FOUND)
             )
-            (err ERR-REMOVAL-COMMENT-NOT-FOUND)
         )
     )
 )
 
 ;; Grant admin privileges to a user (only contract admin can do this)
 (define-public (grant-admin-privileges (user-address principal))
-    (let (
-        (current-user tx-sender)
-    )
-        (asserts! (is-eq current-user contract-admin) (err ERR-OWNER-ACCESS-REQUIRED))
-        (match (map-get? user-data user-address)
-            profile (ok (map-set user-data user-address (merge profile {admin-status: true})))
-            (err ERR-ADMIN-USER-NOT-FOUND)
+    (begin
+        ;; Validate user-address is not null
+        (asserts! (is-some (map-get? user-data user-address)) (err ERR-INVALID-USER-ADDRESS))
+        
+        (let (
+            (current-user tx-sender)
+        )
+            (asserts! (is-eq current-user contract-admin) (err ERR-OWNER-ACCESS-REQUIRED))
+            (match (map-get? user-data user-address)
+                profile (ok (map-set user-data user-address (merge profile {admin-status: true})))
+                (err ERR-ADMIN-USER-NOT-FOUND)
+            )
         )
     )
 )
 
 ;; Revoke admin privileges from a user (only contract admin can do this)
 (define-public (revoke-admin-privileges (user-address principal))
-    (let (
-        (current-user tx-sender)
-    )
-        (asserts! (is-eq current-user contract-admin) (err ERR-OWNER-PRIVILEGES-REQUIRED))
-        (match (map-get? user-data user-address)
-            profile (begin
-                (asserts! (get admin-status profile) (err ERR-USER-NOT-ADMIN))
-                (ok (map-set user-data user-address (merge profile {admin-status: false})))
+    (begin
+        ;; Validate user-address is not null
+        (asserts! (is-some (map-get? user-data user-address)) (err ERR-INVALID-USER-ADDRESS))
+        
+        (let (
+            (current-user tx-sender)
+        )
+            (asserts! (is-eq current-user contract-admin) (err ERR-OWNER-PRIVILEGES-REQUIRED))
+            (match (map-get? user-data user-address)
+                profile (begin
+                    (asserts! (get admin-status profile) (err ERR-USER-NOT-ADMIN))
+                    (ok (map-set user-data user-address (merge profile {admin-status: false})))
+                )
+                (err ERR-REMOVE-ADMIN-NOT-FOUND)
             )
-            (err ERR-REMOVE-ADMIN-NOT-FOUND)
         )
     )
 )
